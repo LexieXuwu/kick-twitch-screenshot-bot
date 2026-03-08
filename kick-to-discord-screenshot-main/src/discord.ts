@@ -154,3 +154,75 @@ export async function sendGif(
     timeout: 30000,
   });
 }
+
+export async function sendEmoji(
+  webhookUrl: string,
+  imageBuffer: Buffer,
+  channelName: string,
+  requestedBy: string,
+  source: 'kick' | 'twitch' = 'kick',
+  isAnimated: boolean = false,
+): Promise<void> {
+  const ext = isAnimated ? 'gif' : 'png';
+  const filename = `emoji-${Date.now()}.${ext}`;
+  const contentType = isAnimated ? 'image/gif' : 'image/png';
+  const color = source === 'twitch' ? 0x9146ff : 0x22c55e;
+  const embed: DiscordEmbed = {
+    author: { name: `${channelName}`, icon_url: 'https://kick.com/favicon.ico' },
+    title: isAnimated ? '😀 Emoji Preview (128x128, animated)' : '😀 Emoji Preview (128x128)',
+    description: [
+      '> *Right-click and save to upload as Discord emoji*',
+      '',
+      '```',
+      `  Channel  ·  ${channelName}`,
+      `  Request  ·  ${requestedBy}`,
+      '```',
+    ].join('\n'),
+    color,
+    image: { url: `attachment://${filename}` },
+    footer: { text: `Requested by ${requestedBy}` },
+    timestamp: new Date().toISOString(),
+  };
+  const { boundary, body } = buildPayloadWithEmbed(embed, imageBuffer, filename, contentType);
+
+  await axios.post(webhookUrl, body, {
+    headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+    timeout: 15000,
+  });
+}
+
+export async function sendSticker(
+  webhookUrl: string,
+  imageBuffer: Buffer,
+  channelName: string,
+  requestedBy: string,
+  source: 'kick' | 'twitch' = 'kick',
+  isAnimated: boolean = false,
+): Promise<void> {
+  const ext = isAnimated ? 'gif' : 'png';
+  const filename = `sticker-${Date.now()}.${ext}`;
+  const contentType = isAnimated ? 'image/gif' : 'image/png';
+  const color = source === 'twitch' ? 0x9146ff : 0x22c55e;
+  const embed: DiscordEmbed = {
+    author: { name: `${channelName}`, icon_url: 'https://kick.com/favicon.ico' },
+    title: isAnimated ? '🏷️ Sticker Preview (320x320, animated)' : '🏷️ Sticker Preview (320x320)',
+    description: [
+      '> *Right-click and save to upload as Discord sticker*',
+      '',
+      '```',
+      `  Channel  ·  ${channelName}`,
+      `  Request  ·  ${requestedBy}`,
+      '```',
+    ].join('\n'),
+    color,
+    image: { url: `attachment://${filename}` },
+    footer: { text: `Requested by ${requestedBy}` },
+    timestamp: new Date().toISOString(),
+  };
+  const { boundary, body } = buildPayloadWithEmbed(embed, imageBuffer, filename, contentType);
+
+  await axios.post(webhookUrl, body, {
+    headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+    timeout: 15000,
+  });
+}

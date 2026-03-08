@@ -35,6 +35,18 @@ export class TwitchChatListener extends EventEmitter {
       } else if (cmd === '!gif') {
         console.log(`[Twitch] !gif command from ${sender}`);
         this.emit('gif', { sender, content: message });
+      } else if (cmd === '!emoji') {
+        console.log(`[Twitch] !emoji command from ${sender}`);
+        this.emit('emoji', { sender, content: message });
+      } else if (cmd === '!emoji2') {
+        console.log(`[Twitch] !emoji2 command from ${sender}`);
+        this.emit('emoji2', { sender, content: message });
+      } else if (cmd === '!sticker') {
+        console.log(`[Twitch] !sticker command from ${sender}`);
+        this.emit('sticker', { sender, content: message });
+      } else if (cmd === '!sticker2') {
+        console.log(`[Twitch] !sticker2 command from ${sender}`);
+        this.emit('sticker2', { sender, content: message });
       } else if (cmd === '!stats') {
         console.log(`[Twitch] !stats command from ${sender}`);
         this.emit('stats', { sender });

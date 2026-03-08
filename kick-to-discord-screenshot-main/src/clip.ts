@@ -103,7 +103,7 @@ export class RollingBuffer {
 
     const outputFile = join(this.bufferDir, `clip-${Date.now()}.mp4`);
 
-    // Re-encode to ensure Discord-friendly size (<25MB)
+    // Re-encode for Discord (Level 2: 50MB limit)
     await new Promise<void>((resolve, reject) => {
       execFile('ffmpeg', [
         '-y',
@@ -111,14 +111,15 @@ export class RollingBuffer {
         '-safe', '0',
         '-i', concatFile,
         '-t', String(durationSeconds),
-        '-vf', 'scale=-2:720',
+        '-vf', 'scale=-2:1080',
         '-c:v', 'libx264',
-        '-b:v', '1500k',
-        '-maxrate', '2000k',
-        '-bufsize', '3000k',
-        '-preset', 'fast',
+        '-b:v', '4000k',
+        '-maxrate', '5000k',
+        '-bufsize', '6000k',
+        '-preset', 'medium',
+        '-profile:v', 'high',
         '-c:a', 'aac',
-        '-b:a', '96k',
+        '-b:a', '128k',
         '-movflags', '+faststart',
         outputFile,
       ], { timeout: 120000 }, (error) => {
@@ -185,7 +186,7 @@ export class RollingBuffer {
 
     const outputFile = join(this.bufferDir, `gif-${Date.now()}.gif`);
 
-    // Convert to GIF with optimization
+    // Convert to GIF: 720p, 15fps, better palette for motion
     await new Promise<void>((resolve, reject) => {
       execFile('ffmpeg', [
         '-y',
@@ -193,11 +194,99 @@ export class RollingBuffer {
         '-safe', '0',
         '-i', concatFile,
         '-t', String(durationSeconds),
-        '-vf', 'fps=10,scale=480:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse',
+        '-vf', 'fps=15,scale=720:-1:flags=lanczos,split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=sierra2_4a',
         '-loop', '0',
         outputFile,
       ], { timeout: 120000 }, (error) => {
         if (error) reject(new Error(`FFmpeg GIF failed: ${error.message}`));
+        else resolve();
+      });
+    });
+
+    const buffer = await readFile(outputFile);
+    await unlink(outputFile).catch(() => {});
+    await unlink(concatFile).catch(() => {});
+
+    return buffer;
+  }
+
+  async captureEmojiGif(durationSeconds: number = 2.5): Promise<Buffer> {
+    if (this.capturing) {
+      throw new Error('A clip is already being captured, please wait');
+    }
+
+    this.capturing = true;
+    try {
+      return await this._doCaptureResizedGif(durationSeconds, 128, 8);
+    } finally {
+      this.capturing = false;
+    }
+  }
+
+  async captureStickerGif(durationSeconds: number = 2.5): Promise<Buffer> {
+    if (this.capturing) {
+      throw new Error('A clip is already being captured, please wait');
+    }
+
+    this.capturing = true;
+    try {
+      return await this._doCaptureResizedGif(durationSeconds, 320, 10);
+    } finally {
+      this.capturing = false;
+    }
+  }
+
+  private async _doCaptureResizedGif(
+    durationSeconds: number,
+    size: number,
+    fps: number,
+  ): Promise<Buffer> {
+    const files = await readdir(this.bufferDir);
+    const segFiles = files.filter(f => f.endsWith('.ts'));
+
+    if (segFiles.length < 2) {
+      throw new Error('Not enough buffer segments yet, please wait a bit longer');
+    }
+
+    const withStats = await Promise.all(
+      segFiles.map(async (f) => {
+        const s = await stat(join(this.bufferDir, f));
+        return { name: f, mtime: s.mtimeMs, size: s.size };
+      })
+    );
+
+    withStats.sort((a, b) => a.mtime - b.mtime);
+    const completed = withStats.slice(0, -1);
+    if (completed.length === 0) {
+      throw new Error('Not enough completed segments yet');
+    }
+
+    const segmentsNeeded = Math.ceil(durationSeconds / this.segmentDuration);
+    const selected = completed.slice(-segmentsNeeded);
+
+    const concatFile = join(this.bufferDir, `concat-resized-${size}.txt`);
+    const concatContent = selected
+      .map(s => `file '${join(this.bufferDir, s.name)}'`)
+      .join('\n');
+    await writeFile(concatFile, concatContent);
+
+    const outputFile = join(this.bufferDir, `resized-${size}-${Date.now()}.gif`);
+
+    const scaleFilter = `scale=${size}:${size}:force_original_aspect_ratio=increase,crop=${size}:${size}`;
+    const paletteFilter = `fps=${fps},${scaleFilter},split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=sierra2_4a`;
+
+    await new Promise<void>((resolve, reject) => {
+      execFile('ffmpeg', [
+        '-y',
+        '-f', 'concat',
+        '-safe', '0',
+        '-i', concatFile,
+        '-t', String(durationSeconds),
+        '-vf', paletteFilter,
+        '-loop', '0',
+        outputFile,
+      ], { timeout: 120000 }, (error) => {
+        if (error) reject(new Error(`FFmpeg resized GIF failed: ${error.message}`));
         else resolve();
       });
     });
