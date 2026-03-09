@@ -116,7 +116,8 @@ export class RollingBuffer {
         '-b:v', '4000k',
         '-maxrate', '5000k',
         '-bufsize', '6000k',
-        '-preset', 'medium',
+        '-preset', 'fast',
+        '-threads', '0',
         '-profile:v', 'high',
         '-c:a', 'aac',
         '-b:a', '128k',
@@ -186,15 +187,16 @@ export class RollingBuffer {
 
     const outputFile = join(this.bufferDir, `gif-${Date.now()}.gif`);
 
-    // Convert to GIF: 720p, 15fps, better palette for motion
+    // Convert to GIF: 720p, 12fps, faster palette (stats_mode=single)
     await new Promise<void>((resolve, reject) => {
       execFile('ffmpeg', [
         '-y',
+        '-threads', '0',
         '-f', 'concat',
         '-safe', '0',
         '-i', concatFile,
         '-t', String(durationSeconds),
-        '-vf', 'fps=15,scale=720:-1:flags=lanczos,split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=sierra2_4a',
+        '-vf', 'fps=12,scale=720:-1:flags=lanczos,split[s0][s1];[s0]palettegen=stats_mode=single[p];[s1][p]paletteuse=dither=sierra2_4a',
         '-loop', '0',
         outputFile,
       ], { timeout: 120000 }, (error) => {
@@ -273,11 +275,12 @@ export class RollingBuffer {
     const outputFile = join(this.bufferDir, `resized-${size}-${Date.now()}.gif`);
 
     const scaleFilter = `scale=${size}:${size}:force_original_aspect_ratio=increase,crop=${size}:${size}`;
-    const paletteFilter = `fps=${fps},${scaleFilter},split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=sierra2_4a`;
+    const paletteFilter = `fps=${fps},${scaleFilter},split[s0][s1];[s0]palettegen=stats_mode=single[p];[s1][p]paletteuse=dither=sierra2_4a`;
 
     await new Promise<void>((resolve, reject) => {
       execFile('ffmpeg', [
         '-y',
+        '-threads', '0',
         '-f', 'concat',
         '-safe', '0',
         '-i', concatFile,

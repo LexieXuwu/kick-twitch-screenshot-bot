@@ -21,6 +21,8 @@ async function captureFrameResized(
   const scaleFilter = `scale=${size}:${size}:force_original_aspect_ratio=increase,crop=${size}:${size}`;
   const args = [
     '-y',
+    '-probesize', '32768',
+    '-analyzeduration', '500000',
     '-i', m3u8Url,
     '-frames:v', '1',
     '-vf', scaleFilter,

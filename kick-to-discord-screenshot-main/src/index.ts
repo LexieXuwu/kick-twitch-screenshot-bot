@@ -99,8 +99,7 @@ async function main() {
       console.log(`[Bot] Taking screenshot (requested by ${displayName})...`);
 
       try {
-        const url = await getFreshStreamUrl();
-        const screenshot = await captureScreenshot(url);
+        const screenshot = await captureScreenshot(m3u8Url);
         console.log(`[Bot] Screenshot captured (${(screenshot.length / 1024).toFixed(1)} KB)`);
 
         await sendScreenshot(DISCORD_WEBHOOK_PICS, screenshot, KICK_CHANNEL!, displayName, platform);
@@ -147,8 +146,7 @@ async function main() {
       console.log(`[Bot] Capturing emoji (requested by ${displayName})...`);
 
       try {
-        const url = await getFreshStreamUrl();
-        const emoji = await captureEmojiStatic(url);
+        const emoji = await captureEmojiStatic(m3u8Url);
         console.log(`[Bot] Emoji captured (${(emoji.length / 1024).toFixed(1)} KB)`);
 
         await sendEmoji(DISCORD_WEBHOOK_EMOJIS, emoji, KICK_CHANNEL!, displayName, platform, false);
@@ -178,8 +176,7 @@ async function main() {
       console.log(`[Bot] Capturing sticker (requested by ${displayName})...`);
 
       try {
-        const url = await getFreshStreamUrl();
-        const sticker = await captureStickerStatic(url);
+        const sticker = await captureStickerStatic(m3u8Url);
         console.log(`[Bot] Sticker captured (${(sticker.length / 1024).toFixed(1)} KB)`);
 
         await sendSticker(DISCORD_WEBHOOK_EMOJIS, sticker, KICK_CHANNEL!, displayName, platform, false);
