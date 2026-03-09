@@ -1,15 +1,21 @@
 # Kick + Twitch Screenshot Bot
 
-A chat bot that captures stream moments on command and posts them to Discord. Listens to **Kick** and **Twitch** chat for `!pic`, `!clip`, `!gif`, and `!stats` — captures from the Kick stream and sends to your Discord webhook.
+A chat bot that captures stream moments on command and posts them to Discord. Listens to **Kick** and **Twitch** chat — captures from the Kick stream and sends to your Discord webhook.
 
 ## Commands
 
 | Command | Description |
 |---------|--------------|
 | `!pic` | Capture a screenshot from the stream |
-| `!clip` | Capture a 30-second clip |
-| `!gif` | Capture a 5-second GIF |
+| `!clip` | Capture a 30-second clip (1080p) |
+| `!gif` | Capture a 5-second GIF (720p) |
+| `!emoji` | Capture a 128×128 static frame (Discord emoji size) |
+| `!emoji2` | Capture a 2.5-second animated emoji GIF (128×128) |
+| `!sticker` | Capture a 320×320 static frame (Discord sticker size) |
+| `!sticker2` | Capture a 2.5-second animated sticker GIF (320×320) |
 | `!stats` | Post the request leaderboard to Discord |
+
+Emoji and sticker captures are sized for Discord — right-click and save from the preview to upload to your server.
 
 ## Prerequisites
 
@@ -47,6 +53,7 @@ A chat bot that captures stream moments on command and posts them to Discord. Li
    DISCORD_WEBHOOK_PICS=https://...
    DISCORD_WEBHOOK_GIFS=https://...
    DISCORD_WEBHOOK_CLIPS=https://...
+   DISCORD_WEBHOOK_EMOJIS=https://...
    ```
 
 4. **Build and run**
