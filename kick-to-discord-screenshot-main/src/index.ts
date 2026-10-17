@@ -1,5 +1,5 @@
 import dotenv from 'dotenv';
-dotenv.config();
+dotenv.config({ quiet: true });
 
 import { acquireSingleInstanceLock, releaseSingleInstanceLock } from './single-instance';
 import { shouldSkipDiscordSend } from './discord-cooldown';
@@ -8,9 +8,8 @@ import { KickChatListener } from './kick/chat';
 import { TwitchChatListener } from './twitch/chat';
 import { captureScreenshot } from './screenshot';
 import { captureEmojiStatic, captureStickerStatic } from './emoji';
-import { sendScreenshot, sendClip, sendGif, sendEmbed, sendEmoji, sendSticker } from './discord';
+import { sendScreenshot, sendClip, sendGif, sendEmoji, sendSticker } from './discord';
 import { RollingBuffer } from './clip';
-import { Leaderboard } from './leaderboard';
 
 const KICK_CHANNEL = process.env.KICK_CHANNEL!;
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL!;
@@ -33,15 +32,29 @@ if (!KICK_CHANNEL || !DISCORD_WEBHOOK_URL) {
 
 acquireSingleInstanceLock();
 
+/** Short, human-readable reason for a failure (network errors often carry no message, only a code). */
+function describeError(e: unknown): string {
+  if (e && typeof e === 'object') {
+    const err = e as { message?: string; code?: string; errors?: { message?: string; code?: string }[]; response?: { status?: number } };
+    if (err.response?.status) return `Kick responded with HTTP ${err.response.status}`;
+    if (err.message) return err.message;
+    if (err.code) return err.code;
+    const inner = err.errors?.find((x) => x?.code || x?.message);
+    if (inner) return inner.code || inner.message || 'network error';
+  }
+  return String(e) || 'unknown error';
+}
+
 async function main() {
   const twitchEnabled = !!(TWITCH_CHANNEL && TWITCH_OAUTH_TOKEN);
 
-  console.log('\n  ╭─────────────────────────────────────╮');
-  console.log('  │   📸 Kick Screenshot Bot             │');
-  console.log('  ╰─────────────────────────────────────╯\n');
-  console.log(`  Kick   ·  ${KICK_CHANNEL}`);
-  if (twitchEnabled) console.log(`  Twitch ·  ${TWITCH_CHANNEL}`);
-  console.log(`  Send   ·  webhook`);
+  // Plain ASCII on purpose: this also ends up in logs\bot.log when run as a scheduled task.
+  console.log('');
+  console.log('  Kick Screenshot Bot');
+  console.log('  -------------------');
+  console.log(`  Kick     :  ${KICK_CHANNEL}`);
+  if (twitchEnabled) console.log(`  Twitch   :  ${TWITCH_CHANNEL}`);
+  console.log('  Send     :  Discord webhook');
   console.log('');
 
   console.log(`Looking up Kick channel ${KICK_CHANNEL}...`);
@@ -79,17 +92,24 @@ async function main() {
 
   const buffer = new RollingBuffer(getFreshStreamUrl);
 
-  const leaderboard = new Leaderboard();
-  await leaderboard.load();
-
   // ── Chat connects whether or not the stream is live ──
+  // A network blip here must not kill the bot: the listener reconnects on its own.
   const chat = new KickChatListener(channelInfo.chatroomId);
-  await chat.connect();
+  try {
+    await chat.connect();
+  } catch (e) {
+    console.error(`[Chat] First connection failed (${describeError(e)}); retrying in the background`);
+    chat.ensureReconnect();
+  }
 
   let twitchChat: TwitchChatListener | null = null;
   if (twitchEnabled) {
     twitchChat = new TwitchChatListener(TWITCH_CHANNEL!, TWITCH_OAUTH_TOKEN!);
-    await twitchChat.connect();
+    try {
+      await twitchChat.connect();
+    } catch (e) {
+      console.error(`[Twitch] Connection failed (${describeError(e)}); Twitch chat will keep retrying`);
+    }
   }
 
   const discordKey = (platform: 'kick' | 'twitch', sender: string, cmd: string) =>
@@ -98,7 +118,7 @@ async function main() {
   const bindHandlers = (chatSource: KickChatListener | TwitchChatListener, senderSuffix: string, platform: 'kick' | 'twitch') => {
     const guard = (cmd: string, sender: string): boolean => {
       if (shouldSkipDiscordSend(discordKey(platform, sender, cmd))) return false;
-      if (cmd !== 'stats' && !state.live) {
+      if (!state.live) {
         console.log(`[Bot] Ignoring !${cmd} from ${sender}${senderSuffix}: ${KICK_CHANNEL} is offline`);
         return false;
       }
@@ -108,7 +128,6 @@ async function main() {
     chatSource.on('pic', async ({ sender }: { sender: string }) => {
       if (!guard('pic', sender)) return;
       const displayName = sender + senderSuffix;
-      leaderboard.increment(sender, 'pic');
       console.log(`[Bot] Taking screenshot (requested by ${displayName})...`);
       try {
         const screenshot = await captureScreenshot(requireLiveUrl());
@@ -123,7 +142,6 @@ async function main() {
     chatSource.on('clip', async ({ sender }: { sender: string }) => {
       if (!guard('clip', sender)) return;
       const displayName = sender + senderSuffix;
-      leaderboard.increment(sender, 'clip');
       console.log(`[Bot] Capturing 30s clip (requested by ${displayName})...`);
       try {
         const clip = await buffer.captureClip(30);
@@ -138,7 +156,6 @@ async function main() {
     chatSource.on('gif', async ({ sender }: { sender: string }) => {
       if (!guard('gif', sender)) return;
       const displayName = sender + senderSuffix;
-      leaderboard.increment(sender, 'gif');
       console.log(`[Bot] Capturing 5s GIF (requested by ${displayName})...`);
       try {
         const gif = await buffer.captureGif(5);
@@ -206,18 +223,6 @@ async function main() {
       }
     });
 
-    chatSource.on('stats', async ({ sender }: { sender: string }) => {
-      if (!guard('stats', sender)) return;
-      const displayName = sender + senderSuffix;
-      console.log(`[Bot] Sending leaderboard (requested by ${displayName})...`);
-      try {
-        const embed = leaderboard.buildEmbed(KICK_CHANNEL, displayName);
-        await sendEmbed(DISCORD_WEBHOOK_URL, embed);
-        console.log('[Bot] Leaderboard sent to Discord!');
-      } catch (error) {
-        console.error('[Bot] Leaderboard failed:', error instanceof Error ? error.message : error);
-      }
-    });
   };
 
   bindHandlers(chat, '', 'kick');
@@ -261,7 +266,7 @@ async function main() {
         await goOffline();
       }
     } catch (e) {
-      console.error('[Bot] Stream status check failed:', e instanceof Error ? e.message : e);
+      console.error(`[Bot] Stream status check failed (${describeError(e)}); will retry`);
     }
     if (!stopping) {
       pollTimer = setTimeout(poll, state.live ? LIVE_POLL_MS : OFFLINE_POLL_MS);
@@ -271,11 +276,11 @@ async function main() {
   await poll();
 
   const chatSources = twitchEnabled ? 'Kick + Twitch' : 'Kick';
-  console.log('\n  ╭────────────────────────────────────────────────────────────────────╮');
-  console.log(`  │  ✓ Running · ${chatSources.padEnd(54)}│`);
-  console.log(`  │  ${(state.live ? 'Stream is live' : `Waiting for ${KICK_CHANNEL} to go live (checking every 30s)`).padEnd(66)}│`);
-  console.log('  │  !pic  !clip  !gif  !emoji  !emoji2  !sticker  !sticker2  !stats   │');
-  console.log('  ╰────────────────────────────────────────────────────────────────────╯\n');
+  console.log('');
+  console.log(`  Running  :  listening to ${chatSources} chat`);
+  console.log(`  Stream   :  ${state.live ? 'live now' : `offline, waiting for ${KICK_CHANNEL} (checking every 30s)`}`);
+  console.log('  Commands :  !pic  !clip  !gif  !emoji  !emoji2  !sticker  !sticker2');
+  console.log('');
 
   const shutdown = async () => {
     if (stopping) return;
@@ -289,11 +294,6 @@ async function main() {
     } catch {
       /* ignore */
     }
-    try {
-      await leaderboard.save();
-    } catch {
-      /* ignore */
-    }
     releaseSingleInstanceLock();
     process.exit(0);
   };
@@ -302,7 +302,7 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error('Fatal:', error instanceof Error ? error.message : error);
+  console.error(`Fatal: ${describeError(error)}`);
   releaseSingleInstanceLock();
   process.exit(1);
 });

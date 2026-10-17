@@ -47,9 +47,6 @@ export class TwitchChatListener extends EventEmitter {
       } else if (cmd === '!sticker2') {
         console.log(`[Twitch] !sticker2 command from ${sender}`);
         this.emit('sticker2', { sender, content: message });
-      } else if (cmd === '!stats') {
-        console.log(`[Twitch] !stats command from ${sender}`);
-        this.emit('stats', { sender });
       }
     });
 

@@ -9,6 +9,8 @@ export interface StreamInfo {
   viewerCount: number;
   channelId: number;
   chatroomId: number;
+  /** Channel profile picture, if Kick returned one. */
+  avatarUrl: string | null;
 }
 
 export async function getStreamInfo(username: string): Promise<StreamInfo> {
@@ -32,5 +34,6 @@ export async function getStreamInfo(username: string): Promise<StreamInfo> {
     viewerCount: data.livestream?.viewer_count || 0,
     channelId: data.id || 0,
     chatroomId: data.chatroom?.id || 0,
+    avatarUrl: typeof data.user?.profile_pic === 'string' && data.user.profile_pic ? data.user.profile_pic : null,
   };
 }

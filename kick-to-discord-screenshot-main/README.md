@@ -6,7 +6,6 @@ A chat bot that captures stream moments on command and posts them to Discord. Li
 
 - **Pics, clips, GIFs** — 1080p clips, 720p GIFs, native-resolution screenshots
 - **Emoji & sticker previews** — 500×500 emoji, 320×320 sticker, static and animated
-- **Leaderboard** — Track who requests the most captures with `!stats`
 - **Dual chat** — Kick + Twitch support when multistreaming
 
 ## Commands
@@ -20,7 +19,6 @@ A chat bot that captures stream moments on command and posts them to Discord. Li
 | `!emoji2` | Capture a 2.5-second animated emoji GIF (500×500) |
 | `!sticker` | Capture a 320×320 static frame (Discord sticker size) |
 | `!sticker2` | Capture a 2.5-second animated sticker GIF (320×320) |
-| `!stats` | Post the request leaderboard to Discord |
 
 Emoji and sticker captures are sized for Discord — right-click and save from the preview to upload to your server.
 
@@ -66,6 +64,49 @@ Emoji and sticker captures are sized for Discord — right-click and save from t
 
    Or use `npm run dev` to build and run in one step.
 
+## Run automatically at login (Windows)
+
+The bot can run as a Windows scheduled task called **Kick Screenshot Bot**: it starts about 30 seconds after you log in, runs in the background with no window, restarts itself if it crashes, and keeps waiting for your stream between broadcasts. No terminal needed.
+
+**Install (once, no admin rights):** right-click `install-task.ps1` → **Run with PowerShell**, or run this in the project folder:
+
+```bash
+powershell -ExecutionPolicy Bypass -File install-task.ps1
+```
+
+This registers the task and starts the bot right away. The task runs `start-bot-hidden.vbs`, which runs the launcher `start-bot.ps1` without a window; the launcher runs `node dist\index.js` and restarts it if it exits with an error. If you also start the bot with `npm start`, the launcher notices `bot.lock` and waits; it takes over when that one stops.
+
+**Check that it is running**
+
+- Open `logs\bot.log` in the project folder. The last lines should show `launcher: starting bot`, then `[Chat] Subscribed to chatroom ...` and the "Running" box. Everything the bot prints goes to this file with a timestamp on each line (it rolls over to `logs\bot.prev.log` at 10 MB).
+- Or open Task Scheduler (press the Windows key, type *Task Scheduler*), click **Task Scheduler Library**, and look for **Kick Screenshot Bot** with status **Running**.
+
+**Start / stop by hand**
+
+- Task Scheduler → right-click **Kick Screenshot Bot** → **Run** or **End**.
+- Or from a terminal:
+
+  ```bash
+  schtasks /Run /TN "Kick Screenshot Bot"
+  ```
+
+  ```bash
+  schtasks /End /TN "Kick Screenshot Bot"
+  ```
+
+- After `npm run build`, end the task and run it again so it picks up the new code (or just end the `node.exe` process in Task Manager: the launcher starts a fresh one within 10 seconds).
+- Ending only `node.exe` does **not** stop the bot for good, because the launcher restarts it. Use **End** on the task.
+
+**Disable or remove**
+
+- Task Scheduler → right-click **Kick Screenshot Bot** → **Disable** (keeps the task but it no longer starts at login) or **Delete**.
+- Or from a terminal:
+
+  ```bash
+  schtasks /Delete /TN "Kick Screenshot Bot" /F
+  ```
+
+- If you move the project folder, run `install-task.ps1` again so the task points at the new location.
 
 ## Troubleshooting
 
@@ -78,7 +119,7 @@ Emoji and sticker captures are sized for Discord — right-click and save from t
 ## Usage
 
 - Start the bot whenever you like. If the Kick channel is offline it **waits** (checking every 30s), connects to chat right away, and starts the clip buffer as soon as the stream goes live. When the stream ends it goes back to waiting, so you can leave it running between streams.
-- While the channel is offline, `!pic`, `!clip`, etc. are ignored (logged, not posted); `!stats` still works.
+- While the channel is offline, commands are ignored (logged in the terminal, nothing is posted).
 - Both Kick and Twitch chat are supported when Twitch credentials are set.
 - Screenshots are taken from the Kick stream; Twitch is only used as an extra chat source. Multistreaming (Kick + Twitch) is recommended.
 - Discord Level 2 (50MB) or higher recommended for clips and GIFs.

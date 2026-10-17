@@ -11,17 +11,26 @@ const INITIAL_SEGMENT_WAIT_MS = 25000;
 const RESTART_DELAY_MS = 5000;
 const RESTART_RETRY_DELAY_MS = 30000;
 const RESTART_MAX_DELAY_MS = 60000;
+/** An FFmpeg process that dies sooner than this counts as a quick failure (triggers back-off). */
+const QUICK_FAILURE_MS = 15000;
+/** A restarted FFmpeg that survives this long is considered healthy again. */
+const RESTART_HEALTHY_MS = 15000;
+/** How many captures may wait in line behind the one that is running. */
+const MAX_QUEUED_CAPTURES = 3;
 
 export class RollingBuffer {
   private ffmpeg: ChildProcess | null = null;
   private bufferDir: string;
   private segmentDuration = 10;
   private segmentWrap = 5; // 5 x 10s = 50s window, gives comfortable 30s margin
-  private capturing = false;
   private running = false;
   private restartTimer: NodeJS.Timeout | null = null;
   private quickFailures = 0;
   private getUrl: StreamUrlProvider;
+  /** Captures run one at a time in arrival order; each new one is chained onto this promise. */
+  private captureChain: Promise<void> = Promise.resolve();
+  /** Captures accepted but not finished yet (the running one plus those waiting). */
+  private capturesPending = 0;
 
   constructor(getUrl: StreamUrlProvider) {
     this.getUrl = getUrl;
@@ -44,16 +53,23 @@ export class RollingBuffer {
 
     console.log('[Buffer] Waiting for initial segments...');
     const deadline = Date.now() + INITIAL_SEGMENT_WAIT_MS;
+    let ready = false;
     while (Date.now() < deadline && this.running) {
       await new Promise((resolve) => setTimeout(resolve, 1000));
       const segs = await this.listSegments().catch(() => []);
       // The newest segment is still being written; we need at least one completed one.
-      if (segs.length >= 2) break;
+      if (segs.length >= 2) {
+        ready = true;
+        break;
+      }
     }
-    if (this.running) console.log('[Buffer] Rolling buffer active');
+    if (!this.running) return;
+    console.log(ready
+      ? '[Buffer] Rolling buffer active'
+      : '[Buffer] No video received yet; the buffer keeps trying in the background');
   }
 
-  private spawnFfmpeg(m3u8Url: string): void {
+  private spawnFfmpeg(m3u8Url: string, isRestart = false): void {
     const proc = spawn('ffmpeg', [
       '-nostdin',
       '-loglevel', 'error',
@@ -71,25 +87,93 @@ export class RollingBuffer {
     ], { stdio: ['ignore', 'ignore', 'pipe'] });
     this.ffmpeg = proc;
 
+    // When the stream has ended, FFmpeg repeats the (very long, token-carrying) playlist URL
+    // and the HTTP status across several lines. Fold all of that into one short summary and
+    // pass every other error line through unchanged.
+    let playlistFailed = false;
+    let playlistStatus: string | null = null;
+    let playlistReported = false;
+    let summaryTimer: NodeJS.Timeout | null = null;
+    let pendingLine = '';
+
+    const reportPlaylistFailure = () => {
+      if (summaryTimer) {
+        clearTimeout(summaryTimer);
+        summaryTimer = null;
+      }
+      if (!playlistFailed || playlistReported) return;
+      playlistReported = true;
+      console.error(`[Buffer] Stream playlist not reachable${playlistStatus ? ` (${playlistStatus})` : ''}`);
+    };
+
+    const handleLine = (line: string) => {
+      if (!line) return;
+      const status = line.match(/(?:Server returned|HTTP error) (\d{3})/)?.[1] ?? null;
+      const isPlaylistError =
+        status !== null ||
+        line.includes(m3u8Url) ||
+        /[?&]token=/.test(line) ||
+        /Error opening input/i.test(line) ||
+        /Failed to reload playlist/i.test(line);
+      if (!isPlaylistError) {
+        console.error(`[Buffer] ${line}`);
+        return;
+      }
+      playlistFailed = true;
+      if (status && !playlistStatus) playlistStatus = status;
+      // FFmpeg prints the status on a separate line from the URL; wait a moment so the
+      // summary can include it.
+      if (!playlistReported && !summaryTimer) summaryTimer = setTimeout(reportPlaylistFailure, 300);
+    };
+
     proc.stderr?.on('data', (data: Buffer) => {
-      const msg = data.toString().trim();
-      if (msg) console.error(`[Buffer] ${msg}`);
+      pendingLine += data.toString();
+      const lines = pendingLine.split(/\r?\n/);
+      pendingLine = lines.pop() ?? '';
+      for (const line of lines) handleLine(line.trim());
     });
 
     proc.on('error', (err) => {
       console.error('[Buffer] FFmpeg error:', err.message);
     });
 
+    // After a restart, say so once the new process has clearly settled in.
+    let healthyTimer: NodeJS.Timeout | null = null;
+    if (isRestart) {
+      healthyTimer = setTimeout(() => {
+        healthyTimer = null;
+        if (this.ffmpeg === proc && this.running && !playlistFailed) {
+          this.quickFailures = 0;
+          console.log('[Buffer] Rolling buffer is back');
+        }
+      }, RESTART_HEALTHY_MS);
+    }
+
     const startedAt = Date.now();
-    proc.on('exit', (code, signal) => {
-      if (this.ffmpeg !== proc) return;
+    let closeHandled = false;
+    // 'close' (not 'exit') so that every stderr line has been read before we report the stop.
+    proc.on('close', (code, signal) => {
+      if (closeHandled) return;
+      closeHandled = true;
+      if (healthyTimer) {
+        clearTimeout(healthyTimer);
+        healthyTimer = null;
+      }
+      handleLine(pendingLine.trim());
+      pendingLine = '';
+      reportPlaylistFailure();
+
+      if (this.ffmpeg !== proc) return; // stopped on purpose (stop() or replaced)
       this.ffmpeg = null;
       if (!this.running) return;
-      // Back off when FFmpeg keeps dying right away (e.g. stream ended, playlist 404s).
-      if (Date.now() - startedAt < 15000) this.quickFailures += 1;
+
+      // Back off when FFmpeg keeps dying right away or the playlist is gone (stream ended).
+      const diedQuickly = Date.now() - startedAt < QUICK_FAILURE_MS;
+      if (diedQuickly || playlistFailed) this.quickFailures += 1;
       else this.quickFailures = 0;
       const delay = Math.min(RESTART_DELAY_MS * 2 ** Math.min(this.quickFailures, 4), RESTART_MAX_DELAY_MS);
-      console.error(`[Buffer] FFmpeg stopped (code ${code ?? signal}); restarting in ${Math.round(delay / 1000)}s...`);
+      const reason = playlistFailed ? 'stream appears to have ended' : `code ${code ?? signal}`;
+      console.error(`[Buffer] FFmpeg stopped (${reason}); restarting in ${Math.round(delay / 1000)}s...`);
       this.scheduleRestart(delay);
     });
   }
@@ -102,10 +186,10 @@ export class RollingBuffer {
       try {
         const url = await this.getUrl();
         if (!this.running) return;
-        console.log('[Buffer] Restarting FFmpeg with a fresh stream URL');
-        this.spawnFfmpeg(url);
+        this.spawnFfmpeg(url, true);
       } catch (e) {
-        console.error('[Buffer] Could not get a stream URL:', e instanceof Error ? e.message : e);
+        const why = e instanceof Error ? e.message : String(e);
+        console.error(`[Buffer] Could not get a stream URL (${why}); trying again in ${Math.round(RESTART_RETRY_DELAY_MS / 1000)}s...`);
         this.scheduleRestart(RESTART_RETRY_DELAY_MS);
       }
     }, delayMs);
@@ -152,19 +236,33 @@ export class RollingBuffer {
     return concatFile;
   }
 
-  private async runCapture(durationSeconds: number, listName: string, outputName: string, args: string[], label: string): Promise<Buffer> {
-    if (this.capturing) {
-      throw new Error('A capture is already in progress, please wait');
+  /**
+   * Queue a capture. Captures run one at a time in arrival order, so a !clip typed right
+   * after a !gif waits its turn instead of being dropped. At most MAX_QUEUED_CAPTURES may wait.
+   */
+  private runCapture(durationSeconds: number, listName: string, outputName: string, args: string[], label: string): Promise<Buffer> {
+    // One running + MAX_QUEUED_CAPTURES waiting is the most we accept.
+    if (this.capturesPending > MAX_QUEUED_CAPTURES) {
+      return Promise.reject(new Error(`Too many captures waiting (${MAX_QUEUED_CAPTURES} already in line), please try again in a moment`));
     }
-    this.capturing = true;
-    let concatFile: string;
-    try {
-      concatFile = await this.prepareConcat(durationSeconds, listName);
-    } catch (e) {
-      this.capturing = false;
-      throw e;
-    }
+    const ahead = this.capturesPending;
+    if (ahead > 0) console.log(`[Buffer] ${label} capture queued (${ahead} ahead)`);
+    this.capturesPending += 1;
 
+    const result = this.captureChain.then(async () => {
+      try {
+        return await this.doCapture(durationSeconds, listName, outputName, args, label);
+      } finally {
+        this.capturesPending -= 1;
+      }
+    });
+    // A failed capture must not block the ones behind it.
+    this.captureChain = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  private async doCapture(durationSeconds: number, listName: string, outputName: string, args: string[], label: string): Promise<Buffer> {
+    const concatFile = await this.prepareConcat(durationSeconds, listName);
     const outputFile = join(this.bufferDir, outputName);
     try {
       await new Promise<void>((resolve, reject) => {
@@ -176,16 +274,21 @@ export class RollingBuffer {
           '-t', String(durationSeconds),
           ...args,
           outputFile,
-        ], { timeout: 120000, maxBuffer: 10 * 1024 * 1024 }, (error) => {
-          if (error) reject(new Error(`FFmpeg ${label} failed: ${error.message}`));
-          else resolve();
+        ], { timeout: 120000, maxBuffer: 10 * 1024 * 1024 }, (error, _stdout, stderr) => {
+          if (!error) {
+            resolve();
+            return;
+          }
+          // Keep the log short: FFmpeg's last error line says what went wrong, the rest is its banner.
+          const lastLine = String(stderr ?? '').trim().split(/\r?\n/).filter(Boolean).pop();
+          const reason = error.killed ? 'timed out' : (lastLine || error.message);
+          reject(new Error(`FFmpeg ${label} failed: ${reason}`));
         });
       });
 
       const buffer = await readFile(outputFile);
       return buffer;
     } finally {
-      this.capturing = false;
       await unlink(outputFile).catch(() => {});
       await unlink(concatFile).catch(() => {});
     }

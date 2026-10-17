@@ -35,6 +35,18 @@ const PING_WATCHDOG_MS = 90000;
 /** Refresh the connection token this long before it expires. */
 const TOKEN_REFRESH_MARGIN_S = 60;
 
+/** Network errors (DNS, connect) often carry an empty message and only a code, or a list of inner errors. */
+export function describeNetworkError(e: unknown): string {
+  if (e && typeof e === 'object') {
+    const err = e as { message?: string; code?: string; errors?: { message?: string; code?: string }[] };
+    if (err.message) return err.message;
+    if (err.code) return err.code;
+    const inner = err.errors?.find((x) => x?.code || x?.message);
+    if (inner) return inner.code || inner.message || 'network error';
+  }
+  return String(e) || 'network error';
+}
+
 type RealtimeTarget =
   | { provider: 'centrifugo'; url: string }
   | { provider: 'pusher'; appKey: string; cluster: string };
@@ -209,7 +221,7 @@ export class KickChatListener extends EventEmitter {
       });
 
       ws.on('error', (error: Error) => {
-        console.error('[Chat] WebSocket error:', error.message);
+        console.error(`[Chat] WebSocket error: ${describeNetworkError(error)}`);
         finish(error);
       });
 
@@ -377,7 +389,7 @@ export class KickChatListener extends EventEmitter {
       });
 
       ws.on('error', (error: Error) => {
-        console.error('[Chat] WebSocket error:', error.message);
+        console.error(`[Chat] WebSocket error: ${describeNetworkError(error)}`);
         finish(error);
       });
 
@@ -393,6 +405,15 @@ export class KickChatListener extends EventEmitter {
   }
 
   // ───────────────────────────── lifecycle ─────────────────────────────
+
+  /**
+   * Make sure a reconnect is on the way (used by the caller when the very first
+   * connect() rejects, e.g. a network blip at startup). Safe to call repeatedly.
+   */
+  ensureReconnect(): void {
+    if (this.ws) return;
+    this.scheduleReconnect();
+  }
 
   private scheduleReconnect(): void {
     if (this.manualStop || this.reconnectTimer) return;
@@ -514,7 +535,6 @@ export class KickChatListener extends EventEmitter {
         case '!emoji2': emitCommand('emoji2', { sender, content }); break;
         case '!sticker': emitCommand('sticker', { sender, content }); break;
         case '!sticker2': emitCommand('sticker2', { sender, content }); break;
-        case '!stats': emitCommand('stats', { sender }); break;
         default: break;
       }
     } catch {
