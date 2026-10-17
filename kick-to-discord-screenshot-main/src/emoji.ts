@@ -4,8 +4,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 import { randomBytes } from 'crypto';
 
-const EMOJI_SIZE = 128;
-const EMOJI_MAX_KB = 256;
+const EMOJI_SIZE = 500;
 const STICKER_SIZE = 320;
 const STICKER_MAX_KB = 512;
 
@@ -53,15 +52,9 @@ async function captureFrameResized(
   });
 }
 
-/** Capture emoji-sized static frame (128x128 PNG, target <256KB). */
+/** Capture emoji-sized static frame (500x500 PNG, target <1MB). */
 export async function captureEmojiStatic(m3u8Url: string): Promise<Buffer> {
-  let buffer = await captureFrameResized(m3u8Url, EMOJI_SIZE, 'png');
-  if (buffer.length <= EMOJI_MAX_KB * 1024) {
-    return buffer;
-  }
-  // Fallback: try 96x96 if over limit
-  buffer = await captureFrameResized(m3u8Url, 96, 'png');
-  return buffer;
+  return captureFrameResized(m3u8Url, EMOJI_SIZE, 'png');
 }
 
 /** Capture sticker-sized static frame (320x320 PNG, target <512KB). */

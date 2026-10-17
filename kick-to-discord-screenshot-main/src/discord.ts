@@ -169,7 +169,7 @@ export async function sendEmoji(
   const color = source === 'twitch' ? 0x9146ff : 0x22c55e;
   const embed: DiscordEmbed = {
     author: { name: `${channelName}`, icon_url: 'https://kick.com/favicon.ico' },
-    title: isAnimated ? '😀 Emoji Preview (128x128, animated)' : '😀 Emoji Preview (128x128)',
+    title: isAnimated ? '😀 Emoji Preview (500x500, animated)' : '😀 Emoji Preview (500x500)',
     description: [
       '> *Right-click and save to upload as Discord emoji*',
       '',

@@ -4,3 +4,5 @@ dist/
 .env.*.local
 *.js.map
 leaderboard.json
+thread_cache.json
+bot.lock

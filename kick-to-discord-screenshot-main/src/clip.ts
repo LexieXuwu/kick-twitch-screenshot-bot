@@ -219,7 +219,7 @@ export class RollingBuffer {
 
     this.capturing = true;
     try {
-      return await this._doCaptureResizedGif(durationSeconds, 128, 8);
+      return await this._doCaptureResizedGif(durationSeconds, 500, 8);
     } finally {
       this.capturing = false;
     }

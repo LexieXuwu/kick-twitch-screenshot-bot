@@ -1,6 +1,8 @@
 import dotenv from 'dotenv';
 dotenv.config();
 
+import { acquireSingleInstanceLock, releaseSingleInstanceLock } from './single-instance';
+import { shouldSkipDiscordSend } from './discord-cooldown';
 import { getStreamInfo } from './kick/stream';
 import { KickChatListener } from './kick/chat';
 import { TwitchChatListener } from './twitch/chat';
@@ -14,7 +16,6 @@ const KICK_CHANNEL = process.env.KICK_CHANNEL!;
 const DISCORD_WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL!;
 const TWITCH_CHANNEL = process.env.TWITCH_CHANNEL;
 const TWITCH_OAUTH_TOKEN = process.env.TWITCH_OAUTH_TOKEN;
-// Optional: separate webhooks for pics and gifs (fall back to main webhook if not set)
 const DISCORD_WEBHOOK_PICS = process.env.DISCORD_WEBHOOK_PICS || DISCORD_WEBHOOK_URL;
 const DISCORD_WEBHOOK_GIFS = process.env.DISCORD_WEBHOOK_GIFS || DISCORD_WEBHOOK_URL;
 const DISCORD_WEBHOOK_CLIPS = process.env.DISCORD_WEBHOOK_CLIPS || DISCORD_WEBHOOK_URL;
@@ -25,6 +26,8 @@ if (!KICK_CHANNEL || !DISCORD_WEBHOOK_URL) {
   process.exit(1);
 }
 
+acquireSingleInstanceLock();
+
 async function main() {
   const twitchEnabled = !!(TWITCH_CHANNEL && TWITCH_OAUTH_TOKEN);
 
@@ -33,14 +36,15 @@ async function main() {
   console.log('  ╰─────────────────────────────────────╯\n');
   console.log(`  Kick   ·  ${KICK_CHANNEL}`);
   if (twitchEnabled) console.log(`  Twitch ·  ${TWITCH_CHANNEL}`);
-  console.log(`  Webhooks · pics, gifs, clips → ${process.env.DISCORD_WEBHOOK_PICS ? 'dedicated' : 'main'}\n`);
+  console.log(`  Send   ·  webhook`);
+  console.log('');
 
-  // Fetch stream info
   console.log(`\nFetching stream info for ${KICK_CHANNEL}...`);
   const streamInfo = await getStreamInfo(KICK_CHANNEL);
 
   if (!streamInfo.isLive || !streamInfo.playbackUrl) {
     console.error(`${KICK_CHANNEL} is not live. Start the bot when the channel is streaming.`);
+    releaseSingleInstanceLock();
     process.exit(1);
   }
 
@@ -59,12 +63,10 @@ async function main() {
     return m3u8Url;
   };
 
-  // Start rolling buffer for clips
   const buffer = new RollingBuffer();
   console.log('\nStarting rolling buffer for !clip...');
   await buffer.start(m3u8Url);
 
-  // Refresh stream URL every 5 min (Kick tokens expire)
   const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
   const refreshInterval = setInterval(async () => {
     try {
@@ -77,32 +79,31 @@ async function main() {
     }
   }, REFRESH_INTERVAL_MS);
 
-  // Leaderboard (persists to leaderboard.json)
   const leaderboard = new Leaderboard();
   await leaderboard.load();
 
-  // Connect to Kick chat
   const chat = new KickChatListener(streamInfo.chatroomId);
   await chat.connect();
 
-  // Connect to Twitch chat (optional)
   let twitchChat: TwitchChatListener | null = null;
   if (twitchEnabled) {
     twitchChat = new TwitchChatListener(TWITCH_CHANNEL!, TWITCH_OAUTH_TOKEN!);
     await twitchChat.connect();
   }
 
+  const discordKey = (platform: 'kick' | 'twitch', sender: string, cmd: string) =>
+    `${platform}:${sender.toLowerCase()}:${cmd}`;
+
   const bindHandlers = (chatSource: KickChatListener | TwitchChatListener, senderSuffix: string, platform: 'kick' | 'twitch') => {
     chatSource.on('pic', async ({ sender }: { sender: string }) => {
+      if (shouldSkipDiscordSend(discordKey(platform, sender, 'pic'))) return;
       const displayName = sender + senderSuffix;
       leaderboard.increment(sender, 'pic');
       console.log(`[Bot] Taking screenshot (requested by ${displayName})...`);
-
       try {
         const screenshot = await captureScreenshot(m3u8Url);
         console.log(`[Bot] Screenshot captured (${(screenshot.length / 1024).toFixed(1)} KB)`);
-
-        await sendScreenshot(DISCORD_WEBHOOK_PICS, screenshot, KICK_CHANNEL!, displayName, platform);
+        await sendScreenshot(DISCORD_WEBHOOK_PICS, screenshot, KICK_CHANNEL, displayName, platform);
         console.log('[Bot] Screenshot sent to Discord!');
       } catch (error) {
         console.error('[Bot] Failed:', error instanceof Error ? error.message : error);
@@ -110,15 +111,14 @@ async function main() {
     });
 
     chatSource.on('clip', async ({ sender }: { sender: string }) => {
+      if (shouldSkipDiscordSend(discordKey(platform, sender, 'clip'))) return;
       const displayName = sender + senderSuffix;
       leaderboard.increment(sender, 'clip');
       console.log(`[Bot] Capturing 30s clip (requested by ${displayName})...`);
-
       try {
         const clip = await buffer.captureClip(30);
         console.log(`[Bot] Clip captured (${(clip.length / 1024 / 1024).toFixed(1)} MB)`);
-
-        await sendClip(DISCORD_WEBHOOK_CLIPS, clip, KICK_CHANNEL!, displayName, platform);
+        await sendClip(DISCORD_WEBHOOK_CLIPS, clip, KICK_CHANNEL, displayName, platform);
         console.log('[Bot] Clip sent to Discord!');
       } catch (error) {
         console.error('[Bot] Clip failed:', error instanceof Error ? error.message : error);
@@ -126,15 +126,14 @@ async function main() {
     });
 
     chatSource.on('gif', async ({ sender }: { sender: string }) => {
+      if (shouldSkipDiscordSend(discordKey(platform, sender, 'gif'))) return;
       const displayName = sender + senderSuffix;
       leaderboard.increment(sender, 'gif');
       console.log(`[Bot] Capturing 5s GIF (requested by ${displayName})...`);
-
       try {
         const gif = await buffer.captureGif(5);
         console.log(`[Bot] GIF captured (${(gif.length / 1024).toFixed(1)} KB)`);
-
-        await sendGif(DISCORD_WEBHOOK_GIFS, gif, KICK_CHANNEL!, displayName, platform);
+        await sendGif(DISCORD_WEBHOOK_GIFS, gif, KICK_CHANNEL, displayName, platform);
         console.log('[Bot] GIF sent to Discord!');
       } catch (error) {
         console.error('[Bot] GIF failed:', error instanceof Error ? error.message : error);
@@ -142,14 +141,13 @@ async function main() {
     });
 
     chatSource.on('emoji', async ({ sender }: { sender: string }) => {
+      if (shouldSkipDiscordSend(discordKey(platform, sender, 'emoji'))) return;
       const displayName = sender + senderSuffix;
       console.log(`[Bot] Capturing emoji (requested by ${displayName})...`);
-
       try {
         const emoji = await captureEmojiStatic(m3u8Url);
         console.log(`[Bot] Emoji captured (${(emoji.length / 1024).toFixed(1)} KB)`);
-
-        await sendEmoji(DISCORD_WEBHOOK_EMOJIS, emoji, KICK_CHANNEL!, displayName, platform, false);
+        await sendEmoji(DISCORD_WEBHOOK_EMOJIS, emoji, KICK_CHANNEL, displayName, platform, false);
         console.log('[Bot] Emoji sent to Discord!');
       } catch (error) {
         console.error('[Bot] Emoji failed:', error instanceof Error ? error.message : error);
@@ -157,14 +155,13 @@ async function main() {
     });
 
     chatSource.on('emoji2', async ({ sender }: { sender: string }) => {
+      if (shouldSkipDiscordSend(discordKey(platform, sender, 'emoji2'))) return;
       const displayName = sender + senderSuffix;
       console.log(`[Bot] Capturing animated emoji (requested by ${displayName})...`);
-
       try {
         const emoji = await buffer.captureEmojiGif(2.5);
         console.log(`[Bot] Animated emoji captured (${(emoji.length / 1024).toFixed(1)} KB)`);
-
-        await sendEmoji(DISCORD_WEBHOOK_EMOJIS, emoji, KICK_CHANNEL!, displayName, platform, true);
+        await sendEmoji(DISCORD_WEBHOOK_EMOJIS, emoji, KICK_CHANNEL, displayName, platform, true);
         console.log('[Bot] Animated emoji sent to Discord!');
       } catch (error) {
         console.error('[Bot] Animated emoji failed:', error instanceof Error ? error.message : error);
@@ -172,14 +169,13 @@ async function main() {
     });
 
     chatSource.on('sticker', async ({ sender }: { sender: string }) => {
+      if (shouldSkipDiscordSend(discordKey(platform, sender, 'sticker'))) return;
       const displayName = sender + senderSuffix;
       console.log(`[Bot] Capturing sticker (requested by ${displayName})...`);
-
       try {
         const sticker = await captureStickerStatic(m3u8Url);
         console.log(`[Bot] Sticker captured (${(sticker.length / 1024).toFixed(1)} KB)`);
-
-        await sendSticker(DISCORD_WEBHOOK_EMOJIS, sticker, KICK_CHANNEL!, displayName, platform, false);
+        await sendSticker(DISCORD_WEBHOOK_EMOJIS, sticker, KICK_CHANNEL, displayName, platform, false);
         console.log('[Bot] Sticker sent to Discord!');
       } catch (error) {
         console.error('[Bot] Sticker failed:', error instanceof Error ? error.message : error);
@@ -187,21 +183,21 @@ async function main() {
     });
 
     chatSource.on('sticker2', async ({ sender }: { sender: string }) => {
+      if (shouldSkipDiscordSend(discordKey(platform, sender, 'sticker2'))) return;
       const displayName = sender + senderSuffix;
       console.log(`[Bot] Capturing animated sticker (requested by ${displayName})...`);
-
       try {
         const sticker = await buffer.captureStickerGif(2.5);
         console.log(`[Bot] Animated sticker captured (${(sticker.length / 1024).toFixed(1)} KB)`);
-
-        await sendSticker(DISCORD_WEBHOOK_EMOJIS, sticker, KICK_CHANNEL!, displayName, platform, true);
+        await sendSticker(DISCORD_WEBHOOK_EMOJIS, sticker, KICK_CHANNEL, displayName, platform, true);
         console.log('[Bot] Animated sticker sent to Discord!');
       } catch (error) {
-        console.error('[Bot] Animated sticker failed:', error instanceof Error ? error.message : error);
+        console.error('[Bot] Sticker failed:', error instanceof Error ? error.message : error);
       }
     });
 
     chatSource.on('stats', async ({ sender }: { sender: string }) => {
+      if (shouldSkipDiscordSend(discordKey(platform, sender, 'stats'))) return;
       const displayName = sender + senderSuffix;
       console.log(`[Bot] Sending leaderboard (requested by ${displayName})...`);
       try {
@@ -223,13 +219,13 @@ async function main() {
   console.log('  │  !pic  !clip  !gif  !emoji  !emoji2  !sticker  !sticker2  !stats  │');
   console.log('  ╰────────────────────────────────────────────────────────────╯\n');
 
-  // Graceful shutdown
   const shutdown = () => {
     console.log('\nShutting down...');
     clearInterval(refreshInterval);
     chat.disconnect();
     twitchChat?.disconnect();
     buffer.stop();
+    releaseSingleInstanceLock();
     leaderboard.save().catch(() => {}).finally(() => process.exit(0));
   };
   process.on('SIGINT', shutdown);
@@ -238,5 +234,6 @@ async function main() {
 
 main().catch((error) => {
   console.error('Fatal:', error);
+  releaseSingleInstanceLock();
   process.exit(1);
 });
