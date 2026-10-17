@@ -1,5 +1,4 @@
 import axios from 'axios';
-import FormData from 'form-data';
 
 /** Discord embed (for rich messages). */
 export interface DiscordEmbed {

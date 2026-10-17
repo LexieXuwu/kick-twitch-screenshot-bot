@@ -21,6 +21,11 @@ const DISCORD_WEBHOOK_GIFS = process.env.DISCORD_WEBHOOK_GIFS || DISCORD_WEBHOOK
 const DISCORD_WEBHOOK_CLIPS = process.env.DISCORD_WEBHOOK_CLIPS || DISCORD_WEBHOOK_URL;
 const DISCORD_WEBHOOK_EMOJIS = process.env.DISCORD_WEBHOOK_EMOJIS || DISCORD_WEBHOOK_URL;
 
+/** How often to check whether the channel is live (while offline). */
+const OFFLINE_POLL_MS = 30 * 1000;
+/** How often to re-check while live (notices the stream ending, keeps the playback URL fresh). */
+const LIVE_POLL_MS = 60 * 1000;
+
 if (!KICK_CHANNEL || !DISCORD_WEBHOOK_URL) {
   console.error('Missing required env vars: KICK_CHANNEL, DISCORD_WEBHOOK_URL');
   process.exit(1);
@@ -39,50 +44,46 @@ async function main() {
   console.log(`  Send   ·  webhook`);
   console.log('');
 
-  console.log(`\nFetching stream info for ${KICK_CHANNEL}...`);
-  const streamInfo = await getStreamInfo(KICK_CHANNEL);
-
-  if (!streamInfo.isLive || !streamInfo.playbackUrl) {
-    console.error(`${KICK_CHANNEL} is not live. Start the bot when the channel is streaming.`);
-    releaseSingleInstanceLock();
-    process.exit(1);
+  console.log(`Looking up Kick channel ${KICK_CHANNEL}...`);
+  let channelInfo;
+  try {
+    channelInfo = await getStreamInfo(KICK_CHANNEL);
+  } catch (e) {
+    throw new Error(`Could not reach Kick for channel "${KICK_CHANNEL}": ${e instanceof Error ? e.message : e}`);
+  }
+  if (!channelInfo.chatroomId) {
+    throw new Error(`Kick channel "${KICK_CHANNEL}" was not found (no chatroom id).`);
   }
 
-  console.log(`Stream: ${streamInfo.title}`);
-  console.log(`Viewers: ${streamInfo.viewerCount}`);
-  console.log(`M3U8: ${streamInfo.playbackUrl.substring(0, 60)}...`);
-
-  let m3u8Url = streamInfo.playbackUrl;
+  // ── Stream state (updated by the poller below) ──
+  const state = {
+    live: false,
+    m3u8Url: null as string | null,
+  };
 
   const getFreshStreamUrl = async (): Promise<string> => {
     const info = await getStreamInfo(KICK_CHANNEL);
     if (!info.isLive || !info.playbackUrl) {
       throw new Error(`${KICK_CHANNEL} is not live`);
     }
-    m3u8Url = info.playbackUrl;
-    return m3u8Url;
+    state.m3u8Url = info.playbackUrl;
+    return info.playbackUrl;
   };
 
-  const buffer = new RollingBuffer();
-  console.log('\nStarting rolling buffer for !clip...');
-  await buffer.start(m3u8Url);
-
-  const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
-  const refreshInterval = setInterval(async () => {
-    try {
-      const fresh = await getFreshStreamUrl();
-      console.log('[Bot] Refreshing stream URL and buffer...');
-      await buffer.stop();
-      await buffer.start(fresh);
-    } catch (e) {
-      console.error('[Bot] Stream refresh failed:', e instanceof Error ? e.message : e);
+  const requireLiveUrl = (): string => {
+    if (!state.live || !state.m3u8Url) {
+      throw new Error(`${KICK_CHANNEL} is offline right now`);
     }
-  }, REFRESH_INTERVAL_MS);
+    return state.m3u8Url;
+  };
+
+  const buffer = new RollingBuffer(getFreshStreamUrl);
 
   const leaderboard = new Leaderboard();
   await leaderboard.load();
 
-  const chat = new KickChatListener(streamInfo.chatroomId);
+  // ── Chat connects whether or not the stream is live ──
+  const chat = new KickChatListener(channelInfo.chatroomId);
   await chat.connect();
 
   let twitchChat: TwitchChatListener | null = null;
@@ -95,13 +96,22 @@ async function main() {
     `${platform}:${sender.toLowerCase()}:${cmd}`;
 
   const bindHandlers = (chatSource: KickChatListener | TwitchChatListener, senderSuffix: string, platform: 'kick' | 'twitch') => {
+    const guard = (cmd: string, sender: string): boolean => {
+      if (shouldSkipDiscordSend(discordKey(platform, sender, cmd))) return false;
+      if (cmd !== 'stats' && !state.live) {
+        console.log(`[Bot] Ignoring !${cmd} from ${sender}${senderSuffix}: ${KICK_CHANNEL} is offline`);
+        return false;
+      }
+      return true;
+    };
+
     chatSource.on('pic', async ({ sender }: { sender: string }) => {
-      if (shouldSkipDiscordSend(discordKey(platform, sender, 'pic'))) return;
+      if (!guard('pic', sender)) return;
       const displayName = sender + senderSuffix;
       leaderboard.increment(sender, 'pic');
       console.log(`[Bot] Taking screenshot (requested by ${displayName})...`);
       try {
-        const screenshot = await captureScreenshot(m3u8Url);
+        const screenshot = await captureScreenshot(requireLiveUrl());
         console.log(`[Bot] Screenshot captured (${(screenshot.length / 1024).toFixed(1)} KB)`);
         await sendScreenshot(DISCORD_WEBHOOK_PICS, screenshot, KICK_CHANNEL, displayName, platform);
         console.log('[Bot] Screenshot sent to Discord!');
@@ -111,7 +121,7 @@ async function main() {
     });
 
     chatSource.on('clip', async ({ sender }: { sender: string }) => {
-      if (shouldSkipDiscordSend(discordKey(platform, sender, 'clip'))) return;
+      if (!guard('clip', sender)) return;
       const displayName = sender + senderSuffix;
       leaderboard.increment(sender, 'clip');
       console.log(`[Bot] Capturing 30s clip (requested by ${displayName})...`);
@@ -126,7 +136,7 @@ async function main() {
     });
 
     chatSource.on('gif', async ({ sender }: { sender: string }) => {
-      if (shouldSkipDiscordSend(discordKey(platform, sender, 'gif'))) return;
+      if (!guard('gif', sender)) return;
       const displayName = sender + senderSuffix;
       leaderboard.increment(sender, 'gif');
       console.log(`[Bot] Capturing 5s GIF (requested by ${displayName})...`);
@@ -141,11 +151,11 @@ async function main() {
     });
 
     chatSource.on('emoji', async ({ sender }: { sender: string }) => {
-      if (shouldSkipDiscordSend(discordKey(platform, sender, 'emoji'))) return;
+      if (!guard('emoji', sender)) return;
       const displayName = sender + senderSuffix;
       console.log(`[Bot] Capturing emoji (requested by ${displayName})...`);
       try {
-        const emoji = await captureEmojiStatic(m3u8Url);
+        const emoji = await captureEmojiStatic(requireLiveUrl());
         console.log(`[Bot] Emoji captured (${(emoji.length / 1024).toFixed(1)} KB)`);
         await sendEmoji(DISCORD_WEBHOOK_EMOJIS, emoji, KICK_CHANNEL, displayName, platform, false);
         console.log('[Bot] Emoji sent to Discord!');
@@ -155,7 +165,7 @@ async function main() {
     });
 
     chatSource.on('emoji2', async ({ sender }: { sender: string }) => {
-      if (shouldSkipDiscordSend(discordKey(platform, sender, 'emoji2'))) return;
+      if (!guard('emoji2', sender)) return;
       const displayName = sender + senderSuffix;
       console.log(`[Bot] Capturing animated emoji (requested by ${displayName})...`);
       try {
@@ -169,11 +179,11 @@ async function main() {
     });
 
     chatSource.on('sticker', async ({ sender }: { sender: string }) => {
-      if (shouldSkipDiscordSend(discordKey(platform, sender, 'sticker'))) return;
+      if (!guard('sticker', sender)) return;
       const displayName = sender + senderSuffix;
       console.log(`[Bot] Capturing sticker (requested by ${displayName})...`);
       try {
-        const sticker = await captureStickerStatic(m3u8Url);
+        const sticker = await captureStickerStatic(requireLiveUrl());
         console.log(`[Bot] Sticker captured (${(sticker.length / 1024).toFixed(1)} KB)`);
         await sendSticker(DISCORD_WEBHOOK_EMOJIS, sticker, KICK_CHANNEL, displayName, platform, false);
         console.log('[Bot] Sticker sent to Discord!');
@@ -183,7 +193,7 @@ async function main() {
     });
 
     chatSource.on('sticker2', async ({ sender }: { sender: string }) => {
-      if (shouldSkipDiscordSend(discordKey(platform, sender, 'sticker2'))) return;
+      if (!guard('sticker2', sender)) return;
       const displayName = sender + senderSuffix;
       console.log(`[Bot] Capturing animated sticker (requested by ${displayName})...`);
       try {
@@ -197,7 +207,7 @@ async function main() {
     });
 
     chatSource.on('stats', async ({ sender }: { sender: string }) => {
-      if (shouldSkipDiscordSend(discordKey(platform, sender, 'stats'))) return;
+      if (!guard('stats', sender)) return;
       const displayName = sender + senderSuffix;
       console.log(`[Bot] Sending leaderboard (requested by ${displayName})...`);
       try {
@@ -213,27 +223,86 @@ async function main() {
   bindHandlers(chat, '', 'kick');
   if (twitchChat) bindHandlers(twitchChat, ' (Twitch)', 'twitch');
 
-  const chatSources = twitchEnabled ? 'Kick + Twitch' : 'Kick';
-  console.log('  ╭────────────────────────────────────────────────────────────╮');
-  console.log(`  │  ✓ Running · ${chatSources.padEnd(46)}│`);
-  console.log('  │  !pic  !clip  !gif  !emoji  !emoji2  !sticker  !sticker2  !stats  │');
-  console.log('  ╰────────────────────────────────────────────────────────────╯\n');
+  // ── Live/offline poller: starts the clip buffer when the stream is up, stops it when down ──
+  let pollTimer: NodeJS.Timeout | null = null;
+  let stopping = false;
 
-  const shutdown = () => {
+  const goLive = async (url: string, title: string | null, viewers: number) => {
+    state.live = true;
+    state.m3u8Url = url;
+    console.log(`\n[Bot] ${KICK_CHANNEL} is LIVE: ${title ?? '(no title)'} · ${viewers} viewers`);
+    console.log(`[Bot] M3U8: ${url.substring(0, 60)}...`);
+    console.log('[Bot] Starting rolling buffer for !clip / !gif...');
+    try {
+      await buffer.start(url);
+    } catch (e) {
+      console.error('[Bot] Buffer start failed:', e instanceof Error ? e.message : e);
+    }
+  };
+
+  const goOffline = async () => {
+    state.live = false;
+    state.m3u8Url = null;
+    console.log(`\n[Bot] ${KICK_CHANNEL} went offline. Waiting for the next stream (chat stays connected)...`);
+    await buffer.stop();
+  };
+
+  const poll = async () => {
+    if (stopping) return;
+    try {
+      const info = await getStreamInfo(KICK_CHANNEL);
+      if (info.isLive && info.playbackUrl) {
+        if (!state.live) {
+          await goLive(info.playbackUrl, info.title, info.viewerCount);
+        } else {
+          state.m3u8Url = info.playbackUrl;
+        }
+      } else if (state.live) {
+        await goOffline();
+      }
+    } catch (e) {
+      console.error('[Bot] Stream status check failed:', e instanceof Error ? e.message : e);
+    }
+    if (!stopping) {
+      pollTimer = setTimeout(poll, state.live ? LIVE_POLL_MS : OFFLINE_POLL_MS);
+    }
+  };
+
+  await poll();
+
+  const chatSources = twitchEnabled ? 'Kick + Twitch' : 'Kick';
+  console.log('\n  ╭────────────────────────────────────────────────────────────────────╮');
+  console.log(`  │  ✓ Running · ${chatSources.padEnd(54)}│`);
+  console.log(`  │  ${(state.live ? 'Stream is live' : `Waiting for ${KICK_CHANNEL} to go live (checking every 30s)`).padEnd(66)}│`);
+  console.log('  │  !pic  !clip  !gif  !emoji  !emoji2  !sticker  !sticker2  !stats   │');
+  console.log('  ╰────────────────────────────────────────────────────────────────────╯\n');
+
+  const shutdown = async () => {
+    if (stopping) return;
+    stopping = true;
     console.log('\nShutting down...');
-    clearInterval(refreshInterval);
+    if (pollTimer) clearTimeout(pollTimer);
     chat.disconnect();
     twitchChat?.disconnect();
-    buffer.stop();
+    try {
+      await buffer.stop();
+    } catch {
+      /* ignore */
+    }
+    try {
+      await leaderboard.save();
+    } catch {
+      /* ignore */
+    }
     releaseSingleInstanceLock();
-    leaderboard.save().catch(() => {}).finally(() => process.exit(0));
+    process.exit(0);
   };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', () => { void shutdown(); });
+  process.on('SIGTERM', () => { void shutdown(); });
 }
 
 main().catch((error) => {
-  console.error('Fatal:', error);
+  console.error('Fatal:', error instanceof Error ? error.message : error);
   releaseSingleInstanceLock();
   process.exit(1);
 });

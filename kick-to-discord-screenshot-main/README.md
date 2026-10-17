@@ -69,12 +69,16 @@ Emoji and sticker captures are sized for Discord — right-click and save from t
 
 ## Troubleshooting
 
-- **Many duplicate Discord posts:** (1) **Several `npm start` processes** — only run one; `bot.lock` blocks a second start from the **same folder**. If you start from different copies of the project, each has its own lock. (2) **Kick reconnect** could stack reconnect timers or leak ping intervals; the chat client now uses a **single reconnect** and clears timers on disconnect. (3) **Duplicate events** are filtered by message id, by **stable sender id** + command (12s), and a final **15s Discord cooldown** per user + command before posting.
+- **Chat never reacts to commands:** Kick retired its old public Pusher chat feed. The bot now asks Kick's realtime API (`web.kick.com/api/v1/realtime/...`) where chat lives and connects there (currently a Centrifugo websocket). You should see `[Chat] Connected to Kick realtime (centrifugo)` and `[Chat] Subscribed to chatroom ...` at startup; if Kick changes this again you will see `[Chat] ... error` lines instead.
+- **Many duplicate Discord posts:** (1) **Several `npm start` processes** — only run one; `bot.lock` blocks a second start from the **same folder**. If you start from different copies of the project, each has its own lock. (2) **Duplicate events** are filtered by message id, by **stable sender id** + command (12s), and a final **15s Discord cooldown** per user + command before posting.
+- **`!clip` / `!gif` say "not enough buffer segments":** the stream just went live (or FFmpeg just restarted after a hiccup). Wait ~30 seconds and try again.
+- **`[Buffer] FFmpeg stopped ... restarting`:** normal when the stream ends or Kick rotates the playback token. The buffer restarts itself with a fresh URL; if the channel is offline the bot notices within a minute and pauses the buffer.
 - If you see a stale lock after a crash, delete `bot.lock` and start again.
 
 ## Usage
 
-- Start the bot **when the Kick channel is live**. It exits if the stream is offline.
+- Start the bot whenever you like. If the Kick channel is offline it **waits** (checking every 30s), connects to chat right away, and starts the clip buffer as soon as the stream goes live. When the stream ends it goes back to waiting, so you can leave it running between streams.
+- While the channel is offline, `!pic`, `!clip`, etc. are ignored (logged, not posted); `!stats` still works.
 - Both Kick and Twitch chat are supported when Twitch credentials are set.
 - Screenshots are taken from the Kick stream; Twitch is only used as an extra chat source. Multistreaming (Kick + Twitch) is recommended.
 - Discord Level 2 (50MB) or higher recommended for clips and GIFs.
